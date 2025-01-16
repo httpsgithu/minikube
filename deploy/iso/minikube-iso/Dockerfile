@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM ubuntu:18.04
+FROM ubuntu:20.04
 
 RUN apt-get update \
-	&& apt-get install -y apt dpkg apt-utils ca-certificates \
+	&& apt-get install -y apt dpkg apt-utils ca-certificates software-properties-common \
+	&& add-apt-repository -y ppa:longsleep/golang-backports \
 	&& apt-get upgrade -y \
 	&& apt-get install -y \
 		build-essential \
@@ -35,10 +36,14 @@ RUN apt-get update \
 		dumb-init \
 		golang-go \
 		libpcre3-dev \
+		mkisofs \
 	&& rm -rf /var/lib/apt/lists/*
 
+RUN mkdir /app
+RUN chmod 777 /app
+
 RUN localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
-ENV LANG en_US.utf8
+ENV LANG=en_US.utf8
 
 # dumb init will allow us to interrupt the build with ^C
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]

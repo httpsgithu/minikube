@@ -18,7 +18,7 @@ package machine
 
 import (
 	"errors"
-	"io/ioutil"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -105,7 +105,7 @@ func RemoteHostInfo(r command.Runner) (*HostInfo, error, error, error) {
 
 // showLocalOsRelease shows systemd information about the current linux distribution, on the local host
 func showLocalOsRelease() {
-	osReleaseOut, err := ioutil.ReadFile("/etc/os-release")
+	osReleaseOut, err := os.ReadFile("/etc/os-release")
 	if err != nil {
 		klog.Errorf("ReadFile: %v", err)
 		return
@@ -142,7 +142,7 @@ var (
 	cachedSystemMemoryErr   *error
 )
 
-//  cachedSysMemLimit will return a cached limit for the system's virtual memory.
+// cachedSysMemLimit will return a cached limit for the system's virtual memory.
 func cachedSysMemLimit() (*mem.VirtualMemoryStat, error) {
 	if cachedSystemMemoryLimit == nil {
 		v, err := mem.VirtualMemory()
@@ -178,7 +178,7 @@ var (
 	cachedCPUErr *error
 )
 
-//  cachedCPUInfo will return a cached cpu info
+// cachedCPUInfo will return a cached cpu info
 func cachedCPUInfo() ([]cpu.InfoStat, error) {
 	if cachedCPU == nil {
 		// one InfoStat per thread

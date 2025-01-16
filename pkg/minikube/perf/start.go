@@ -19,7 +19,6 @@ package perf
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -36,7 +35,7 @@ const (
 )
 
 // CompareMinikubeStart compares the time to run `minikube start` between two minikube binaries
-func CompareMinikubeStart(ctx context.Context, out io.Writer, binaries []*Binary) error {
+func CompareMinikubeStart(ctx context.Context, binaries []*Binary) error {
 	drivers := []string{"kvm2", "docker"}
 	if runtime.GOOS == "darwin" {
 		drivers = []string{"hyperkit", "docker"}
@@ -74,7 +73,7 @@ func collectResults(ctx context.Context, binaries []*Binary, driver string, runt
 				return nil, errors.Wrapf(err, "timing run %d with %s", run, binary.Name())
 			}
 			rm.addResult(binary, "start", *r)
-			if !skipIngress(driver, runtime) {
+			if !skipIngress(driver) {
 				r, err = timeEnableIngress(ctx, binary)
 				if err != nil {
 					return nil, errors.Wrapf(err, "timing run %d with %s", run, binary.Name())
@@ -100,11 +99,16 @@ func average(nums []float64) float64 {
 
 func downloadArtifacts(ctx context.Context, binaries []*Binary, driver string, runtime string) error {
 	for _, b := range binaries {
-		c := exec.CommandContext(ctx, b.path, "start", fmt.Sprintf("--driver=%s", driver), "--download-only", fmt.Sprintf("--container-runtime=%s", runtime))
+		c := exec.CommandContext(ctx, b.path, "start", fmt.Sprintf("--driver=%s", driver), fmt.Sprintf("--container-runtime=%s", runtime))
 		c.Stderr = os.Stderr
 		log.Printf("Running: %v...", c.Args)
 		if err := c.Run(); err != nil {
-			return errors.Wrap(err, "downloading artifacts")
+			return errors.Wrap(err, "artifact download start")
+		}
+		c = exec.CommandContext(ctx, b.path, "delete")
+		log.Printf("Running: %v...", c.Args)
+		if err := c.Run(); err != nil {
+			return errors.Wrap(err, "artifact download delete")
 		}
 	}
 	return nil
@@ -136,8 +140,8 @@ func timeEnableIngress(ctx context.Context, binary *Binary) (*result, error) {
 }
 
 // Ingress doesn't currently work on MacOS with the docker driver
-func skipIngress(driver string, cruntime string) bool {
-	return (runtime.GOOS == "darwin" && driver == "docker") || cruntime == "containerd"
+func skipIngress(driver string) bool {
+	return (runtime.GOOS == "darwin" && driver == "docker")
 }
 
 // We only want to run the tests if:

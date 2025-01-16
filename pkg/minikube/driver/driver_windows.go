@@ -29,10 +29,11 @@ import (
 // supportedDrivers is a list of supported drivers on Windows.
 var supportedDrivers = []string{
 	VirtualBox,
-	VMwareFusion,
 	HyperV,
 	VMware,
+	QEMU2,
 	Docker,
+	Podman,
 	SSH,
 }
 

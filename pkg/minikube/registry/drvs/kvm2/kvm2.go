@@ -1,4 +1,4 @@
-// +build linux
+//go:build linux
 
 /*
 Copyright 2018 The Kubernetes Authors All rights reserved.
@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -70,6 +71,7 @@ type kvmDriver struct {
 	Hidden         bool
 	ConnectionURI  string
 	NUMANodeCount  int
+	ExtraDisks     int
 }
 
 func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
@@ -92,6 +94,7 @@ func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
 		Hidden:         cc.KVMHidden,
 		ConnectionURI:  cc.KVMQemuURI,
 		NUMANodeCount:  cc.KVMNUMACount,
+		ExtraDisks:     cc.ExtraDisks,
 	}, nil
 }
 
@@ -134,7 +137,7 @@ func status() registry.State {
 			return registry.State{
 				Installed: true,
 				Running:   true,
-				// keep the error messsage in sync with reason.providerIssues(Kind.ID: "PR_KVM_USER_PERMISSION") regexp
+				// keep the error message in sync with reason.providerIssues(Kind.ID: "PR_KVM_USER_PERMISSION") regexp
 				Error:  fmt.Errorf("libvirt group membership check failed:\n%v", err.Error()),
 				Reason: "PR_KVM_USER_PERMISSION",
 				Fix:    "Check that libvirtd is properly installed and that you are a member of the appropriate libvirt group (remember to relogin for group changes to take effect!)",
@@ -145,7 +148,7 @@ func status() registry.State {
 			return registry.State{
 				Installed: true,
 				Running:   true,
-				// keep the error messsage in sync with reason.providerIssues(Kind.ID: "PR_KVM_USER_PERMISSION") regexp
+				// keep the error message in sync with reason.providerIssues(Kind.ID: "PR_KVM_USER_PERMISSION") regexp
 				Error:  fmt.Errorf("libvirt group membership check failed:\nuser is not a member of the appropriate libvirt group"),
 				Reason: "PR_KVM_USER_PERMISSION",
 				Fix:    "Check that libvirtd is properly installed and that you are a member of the appropriate libvirt group (remember to relogin for group changes to take effect!)",
@@ -163,6 +166,18 @@ func status() registry.State {
 			Doc:       docURL,
 		}
 	}
+
+	if runtime.GOARCH == "arm64" {
+		return registry.State{
+			Installed: true,
+			Running:   true,
+			Error:     fmt.Errorf("KVM is not supported on arm64 due to a gcc build error, contributions are welcome"),
+			Fix:       "follow the github issue for possible fix",
+			Doc:       "https://github.com/kubernetes/minikube/issues/19959",
+		}
+
+	}
+
 	if err != nil {
 		return registry.State{
 			Installed: true,

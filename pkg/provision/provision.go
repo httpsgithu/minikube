@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/template"
 	"time"
@@ -83,7 +84,7 @@ func configureAuth(p miniProvisioner) error {
 	klog.Infof("configureAuth start")
 	start := time.Now()
 	defer func() {
-		klog.Infof("duration metric: configureAuth took %s", time.Since(start))
+		klog.Infof("duration metric: took %s to configureAuth", time.Since(start))
 	}()
 
 	driver := p.GetDriver()
@@ -106,8 +107,13 @@ func configureAuth(p miniProvisioner) error {
 		return err
 	}
 
+	hosts := authOptions.ServerCertSANs
 	// The Host IP is always added to the certificate's SANs list
-	hosts := append(authOptions.ServerCertSANs, ip, hostIP, "localhost", "127.0.0.1", "minikube", machineName)
+	hosts = append(hosts, ip, hostIP, "localhost", "127.0.0.1", "minikube", machineName)
+	// eliminate duplicates in 'hosts'
+	slices.Sort(hosts)
+	hosts = slices.Compact(hosts)
+
 	klog.Infof("generating server cert: %s ca-key=%s private-key=%s org=%s san=%s",
 		authOptions.ServerCertPath,
 		authOptions.CaCertPath,

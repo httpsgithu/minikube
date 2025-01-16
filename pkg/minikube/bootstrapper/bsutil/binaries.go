@@ -38,7 +38,7 @@ import (
 )
 
 // TransferBinaries transfers all required Kubernetes binaries
-func TransferBinaries(cfg config.KubernetesConfig, c command.Runner, sm sysinit.Manager) error {
+func TransferBinaries(cfg config.KubernetesConfig, c command.Runner, sm sysinit.Manager, binariesURL string) error {
 	ok, err := binariesExist(cfg, c)
 	if err == nil && ok {
 		klog.Info("Found k8s binaries, skipping transfer")
@@ -56,7 +56,7 @@ func TransferBinaries(cfg config.KubernetesConfig, c command.Runner, sm sysinit.
 	for _, name := range constants.KubernetesReleaseBinaries {
 		name := name
 		g.Go(func() error {
-			src, err := download.Binary(name, cfg.KubernetesVersion, "linux", runtime.GOARCH)
+			src, err := download.Binary(name, cfg.KubernetesVersion, "linux", runtime.GOARCH, binariesURL)
 			if err != nil {
 				return errors.Wrapf(err, "downloading %s", name)
 			}
@@ -81,10 +81,10 @@ func TransferBinaries(cfg config.KubernetesConfig, c command.Runner, sm sysinit.
 func binariesExist(cfg config.KubernetesConfig, c command.Runner) (bool, error) {
 	dir := binRoot(cfg.KubernetesVersion)
 	rr, err := c.RunCmd(exec.Command("sudo", "ls", dir))
-	stdout := rr.Stdout.String()
 	if err != nil {
 		return false, err
 	}
+	stdout := rr.Stdout.String()
 	foundBinaries := map[string]struct{}{}
 	for _, binary := range strings.Split(stdout, "\n") {
 		foundBinaries[binary] = struct{}{}

@@ -18,12 +18,14 @@ limitations under the License.
 package kverify
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"path"
 	"strconv"
@@ -36,19 +38,19 @@ import (
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
-	kconst "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/minikube/pkg/minikube/bootstrapper"
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/cruntime"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/util/retry"
+	kconst "k8s.io/minikube/third_party/kubeadm/app/constants"
 )
 
 // WaitForAPIServerProcess waits for api server to be healthy returns error if it doesn't
 func WaitForAPIServerProcess(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.ClusterConfig, cr command.Runner, start time.Time, timeout time.Duration) error {
 	klog.Infof("waiting for apiserver process to appear ...")
-	err := wait.PollImmediate(time.Millisecond*500, timeout, func() (bool, error) {
+	err := wait.PollUntilContextTimeout(context.Background(), time.Millisecond*500, timeout, true, func(_ context.Context) (bool, error) {
 		if time.Since(start) > timeout {
 			return false, fmt.Errorf("cluster wait timed out during process check")
 		}
@@ -86,7 +88,7 @@ func WaitForHealthyAPIServer(r cruntime.Manager, bs bootstrapper.Bootstrapper, c
 	klog.Infof("waiting for apiserver healthz status ...")
 	hStart := time.Now()
 
-	healthz := func() (bool, error) {
+	healthz := func(_ context.Context) (bool, error) {
 		if time.Since(start) > timeout {
 			return false, fmt.Errorf("cluster wait timed out during healthz check")
 		}
@@ -107,11 +109,11 @@ func WaitForHealthyAPIServer(r cruntime.Manager, bs bootstrapper.Bootstrapper, c
 		return true, nil
 	}
 
-	if err := wait.PollImmediate(kconst.APICallRetryInterval, kconst.DefaultControlPlaneTimeout, healthz); err != nil {
+	if err := wait.PollUntilContextTimeout(context.Background(), kconst.APICallRetryInterval, kconst.DefaultControlPlaneTimeout, true, healthz); err != nil {
 		return fmt.Errorf("apiserver healthz never reported healthy: %v", err)
 	}
 
-	vcheck := func() (bool, error) {
+	vcheck := func(_ context.Context) (bool, error) {
 		if time.Since(start) > timeout {
 			return false, fmt.Errorf("cluster wait timed out during version check")
 		}
@@ -122,7 +124,7 @@ func WaitForHealthyAPIServer(r cruntime.Manager, bs bootstrapper.Bootstrapper, c
 		return true, nil
 	}
 
-	if err := wait.PollImmediate(kconst.APICallRetryInterval, kconst.DefaultControlPlaneTimeout, vcheck); err != nil {
+	if err := wait.PollUntilContextTimeout(context.Background(), kconst.APICallRetryInterval, kconst.DefaultControlPlaneTimeout, true, vcheck); err != nil {
 		return fmt.Errorf("controlPlane never updated to %s", cfg.KubernetesConfig.KubernetesVersion)
 	}
 
@@ -148,7 +150,7 @@ func APIServerVersionMatch(client *kubernetes.Clientset, expected string) error 
 // by container runtime restart for example and there is a gap before it comes back
 func WaitForAPIServerStatus(cr command.Runner, to time.Duration, hostname string, port int) (state.State, error) {
 	var st state.State
-	err := wait.PollImmediate(200*time.Millisecond, to, func() (bool, error) {
+	err := wait.PollUntilContextTimeout(context.Background(), 500*time.Millisecond, to, true, func(_ context.Context) (bool, error) {
 		var err error
 		st, err = APIServerStatus(cr, hostname, port)
 		if st == state.Stopped {
@@ -173,7 +175,7 @@ func APIServerStatus(cr command.Runner, hostname string, port int) (state.State,
 	rr, err := cr.RunCmd(exec.Command("sudo", "egrep", "^[0-9]+:freezer:", fmt.Sprintf("/proc/%d/cgroup", pid)))
 	if err != nil {
 		klog.Warningf("unable to find freezer cgroup: %v", err)
-		return apiServerHealthz(hostname, port)
+		return nonFreezerServerStatus(cr, hostname, port)
 
 	}
 	freezer := strings.TrimSpace(rr.Stdout.String())
@@ -181,7 +183,7 @@ func APIServerStatus(cr command.Runner, hostname string, port int) (state.State,
 	fparts := strings.Split(freezer, ":")
 	if len(fparts) != 3 {
 		klog.Warningf("unable to parse freezer - found %d parts: %s", len(fparts), freezer)
-		return apiServerHealthz(hostname, port)
+		return nonFreezerServerStatus(cr, hostname, port)
 	}
 
 	rr, err = cr.RunCmd(exec.Command("sudo", "cat", path.Join("/sys/fs/cgroup/freezer", fparts[2], "freezer.state")))
@@ -195,12 +197,24 @@ func APIServerStatus(cr command.Runner, hostname string, port int) (state.State,
 			klog.Warningf("unable to get freezer state: %s", rr.Stderr.String())
 		}
 
-		return apiServerHealthz(hostname, port)
+		return nonFreezerServerStatus(cr, hostname, port)
 	}
 
 	fs := strings.TrimSpace(rr.Stdout.String())
 	klog.Infof("freezer state: %q", fs)
 	if fs == "FREEZING" || fs == "FROZEN" {
+		return state.Paused, nil
+	}
+	return apiServerHealthz(hostname, port)
+}
+
+// nonFreezerServerStatus is the alternative flow if the guest does not have the freezer cgroup so different methods to detect the apiserver status are used
+func nonFreezerServerStatus(cr command.Runner, hostname string, port int) (state.State, error) {
+	rr, err := cr.RunCmd(exec.Command("ls"))
+	if err != nil {
+		return state.None, err
+	}
+	if strings.Contains(rr.Stdout.String(), "paused") {
 		return state.Paused, nil
 	}
 	return apiServerHealthz(hostname, port)
@@ -237,7 +251,7 @@ func apiServerHealthz(hostname string, port int) (state.State, error) {
 func apiServerHealthzNow(hostname string, port int) (state.State, error) {
 	url := fmt.Sprintf("https://%s/healthz", net.JoinHostPort(hostname, fmt.Sprint(port)))
 	klog.Infof("Checking apiserver healthz at %s ...", url)
-	cert, err := ioutil.ReadFile(localpath.CACert())
+	cert, err := os.ReadFile(localpath.CACert())
 	if err != nil {
 		klog.Infof("ca certificate: %v", err)
 		return state.Stopped, err
@@ -257,7 +271,7 @@ func apiServerHealthzNow(hostname string, port int) (state.State, error) {
 	}
 
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		klog.Warningf("unable to read response body: %s", err)
 	}

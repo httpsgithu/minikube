@@ -69,7 +69,7 @@ func init() {
 }
 
 // runStop handles the executes the flow of "minikube stop"
-func runStop(cmd *cobra.Command, args []string) {
+func runStop(_ *cobra.Command, _ []string) {
 	out.SetJSON(outputFormat == "json")
 	register.Reg.SetStep(register.Stopping)
 
@@ -119,9 +119,7 @@ func runStop(cmd *cobra.Command, args []string) {
 	}
 
 	register.Reg.SetStep(register.Done)
-	if stoppedNodes > 0 {
-		out.Step(style.Stopped, `{{.count}} nodes stopped.`, out.V{"count": stoppedNodes})
-	}
+	out.Step(style.Stopped, `{{.count}} node{{if gt .count 1}}s{{end}} stopped.`, out.V{"count": stoppedNodes})
 }
 
 func stopProfile(profile string) int {
@@ -132,17 +130,19 @@ func stopProfile(profile string) int {
 	api, cc := mustload.Partial(profile)
 	defer api.Close()
 
-	for _, n := range cc.Nodes {
+	if err := killMountProcess(); err != nil {
+		out.WarningT("Unable to kill mount process: {{.error}}", out.V{"error": err})
+	}
+
+	// stop nodes in reverse order, so last one being primary control-plane node, that will start first next time
+	for i := len(cc.Nodes) - 1; i >= 0; i-- {
+		n := cc.Nodes[i]
 		machineName := config.MachineName(*cc, n)
 
 		nonexistent := stop(api, machineName)
 		if !nonexistent {
 			stoppedNodes++
 		}
-	}
-
-	if err := killMountProcess(); err != nil {
-		out.WarningT("Unable to kill mount process: {{.error}}", out.V{"error": err})
 	}
 
 	if !keepActive {

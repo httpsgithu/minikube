@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
@@ -161,26 +160,40 @@ func (e *execRunner) Copy(f assets.CopyableFile) error {
 
 	if e.sudo {
 		// write to temp location ...
-		tmpfile, err := ioutil.TempFile("", "minikube")
+		tmpfile, err := os.CreateTemp("", "minikube")
 		if err != nil {
-			return errors.Wrapf(err, "error creating tempfile")
+			return errors.Wrap(err, "error creating tempfile")
 		}
 		defer os.Remove(tmpfile.Name())
-		err = writeFile(tmpfile.Name(), f, os.FileMode(perms))
-		if err != nil {
+
+		if err := writeFile(tmpfile.Name(), f, os.FileMode(perms)); err != nil {
 			return errors.Wrapf(err, "error writing to tempfile %s", tmpfile.Name())
 		}
 
-		// ... then use sudo to move to target ...
-		_, err = e.RunCmd(exec.Command("sudo", "cp", "-a", tmpfile.Name(), dst))
-		if err != nil {
+		// ... then use sudo to move to target
+		if _, err := e.RunCmd(exec.Command("sudo", "cp", "-a", tmpfile.Name(), dst)); err != nil {
 			return errors.Wrapf(err, "error copying tempfile %s to dst %s", tmpfile.Name(), dst)
 		}
-
-		// ... then fix file permission that should have been fine because of "cp -a"
-		err = os.Chmod(dst, os.FileMode(perms))
-		return err
+		return nil
 	}
+	return writeFile(dst, f, os.FileMode(perms))
+}
+
+// CopyFrom copies a file
+func (e *execRunner) CopyFrom(f assets.CopyableFile) error {
+	src := path.Join(f.GetTargetDir(), f.GetTargetName())
+
+	dst := f.GetSourcePath()
+	klog.Infof("cp: %s --> %s (%d bytes)", src, dst, f.GetLength())
+	if f.GetLength() == 0 {
+		klog.Warningf("0 byte asset: %+v", f)
+	}
+
+	perms, err := strconv.ParseInt(f.GetPermissions(), 8, 0)
+	if err != nil || perms > 07777 {
+		return errors.Wrapf(err, "error converting permissions %s to integer", f.GetPermissions())
+	}
+
 	return writeFile(dst, f, os.FileMode(perms))
 }
 
@@ -201,4 +214,8 @@ func (e *execRunner) Remove(f assets.CopyableFile) error {
 		return nil
 	}
 	return os.Remove(dst)
+}
+
+func (e *execRunner) ReadableFile(_ string) (assets.ReadableFile, error) {
+	return nil, fmt.Errorf("execRunner does not support ReadableFile - you could be the first to add it")
 }

@@ -24,9 +24,10 @@ import (
 
 const (
 	// Version is the current version of kic
-	Version = "v0.0.25"
+	Version = "v0.0.46"
+
 	// SHA of the kic base image
-	baseImageSHA = "6f936e3443b95cd918d77623bf7b595653bb382766e280290a02b4a349e88b79"
+	baseImageSHA = "fd2d445ddcc33ebc5c6b68a17e6219ea207ce63c005095ea1525296da2d1a279"
 	// The name of the GCR kicbase repository
 	gcrRepo = "gcr.io/k8s-minikube/kicbase"
 	// The name of the Dockerhub kicbase repository
@@ -63,7 +64,10 @@ type Config struct {
 	Envs              map[string]string // key,value of environment variables passed to the node
 	KubernetesVersion string            // Kubernetes version to install
 	ContainerRuntime  string            // container runtime kic is running
-	Network           string            //  network to run with kic
+	Network           string            // network to run with kic
+	Subnet            string            // subnet to be used on kic cluster
+	StaticIP          string            // static IP for the kic cluster
 	ExtraArgs         []string          // a list of any extra option to pass to oci binary during creation time, for example --expose 8080...
 	ListenAddress     string            // IP Address to listen to
+	GPUs              string            // add GPU devices to the container
 }
