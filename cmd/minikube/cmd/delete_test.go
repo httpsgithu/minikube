@@ -18,9 +18,10 @@ package cmd
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/docker/machine/libmachine"
@@ -33,7 +34,7 @@ import (
 	"k8s.io/minikube/pkg/minikube/localpath"
 )
 
-// except returns a list of strings, minus the excluded ones
+// exclude returns a list of strings, minus the excluded ones
 func exclude(vals []string, exclude []string) []string {
 	result := []string{}
 	for _, v := range vals {
@@ -53,7 +54,7 @@ func exclude(vals []string, exclude []string) []string {
 
 func fileNames(path string) ([]string, error) {
 	result := []string{}
-	fis, err := ioutil.ReadDir(path)
+	fis, err := os.ReadDir(path)
 	if err != nil {
 		return result, err
 	}
@@ -64,20 +65,9 @@ func fileNames(path string) ([]string, error) {
 }
 
 func TestDeleteProfile(t *testing.T) {
-	td, err := ioutil.TempDir("", "single")
-	if err != nil {
-		t.Fatalf("tempdir: %v", err)
-	}
+	td := t.TempDir()
 
-	t.Cleanup(func() {
-		err := os.RemoveAll(td)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", td)
-		}
-	})
-
-	err = copy.Copy("../../../pkg/minikube/config/testdata/delete-single", td)
-	if err != nil {
+	if err := copy.Copy("../../../pkg/minikube/config/testdata/delete-single", td); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 
@@ -98,10 +88,7 @@ func TestDeleteProfile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err = os.Setenv(localpath.MinikubeHome, td)
-			if err != nil {
-				t.Errorf("setenv: %v", err)
-			}
+			t.Setenv(localpath.MinikubeHome, td)
 
 			beforeProfiles, err := fileNames(filepath.Join(localpath.MiniPath(), "profiles"))
 			if err != nil {
@@ -158,9 +145,7 @@ func TestDeleteProfile(t *testing.T) {
 	}
 }
 
-var hostAndDirsDeleterMock = func(api libmachine.API, cc *config.ClusterConfig, profileName string) error {
-	return deleteContextTest()
-}
+var hostAndDirsDeleterMock = func(_ libmachine.API, _ *config.ClusterConfig, _ string) error { return deleteContextTest() }
 
 func deleteContextTest() error {
 	if err := cmdcfg.Unset(config.ProfileName); err != nil {
@@ -170,26 +155,13 @@ func deleteContextTest() error {
 }
 
 func TestDeleteAllProfiles(t *testing.T) {
-	td, err := ioutil.TempDir("", "all")
-	if err != nil {
-		t.Fatalf("tempdir: %v", err)
-	}
-	defer func() { // clean up tempdir
-		err := os.RemoveAll(td)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", td)
-		}
-	}()
+	td := t.TempDir()
 
-	err = copy.Copy("../../../pkg/minikube/config/testdata/delete-all", td)
-	if err != nil {
+	if err := copy.Copy("../../../pkg/minikube/config/testdata/delete-all", td); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 
-	err = os.Setenv(localpath.MinikubeHome, td)
-	if err != nil {
-		t.Errorf("error setting up test environment. could not set %s", localpath.MinikubeHome)
-	}
+	t.Setenv(localpath.MinikubeHome, td)
 
 	pFiles, err := fileNames(filepath.Join(localpath.MiniPath(), "profiles"))
 	if err != nil {
@@ -221,7 +193,8 @@ func TestDeleteAllProfiles(t *testing.T) {
 		t.Errorf("ListProfiles length = %d, expected %d\nvalid: %v\ninvalid: %v\n", len(validProfiles)+len(inValidProfiles), numberOfTotalProfileDirs, validProfiles, inValidProfiles)
 	}
 
-	profiles := append(validProfiles, inValidProfiles...)
+	profiles := validProfiles
+	profiles = append(profiles, inValidProfiles...)
 	hostAndDirsDeleter = hostAndDirsDeleterMock
 	errs := DeleteProfiles(profiles)
 
@@ -233,7 +206,7 @@ func TestDeleteAllProfiles(t *testing.T) {
 	if err != nil {
 		t.Errorf("profiles: %v", err)
 	}
-	afterMachines, err := ioutil.ReadDir(filepath.Join(localpath.MiniPath(), "machines"))
+	afterMachines, err := os.ReadDir(filepath.Join(localpath.MiniPath(), "machines"))
 	if err != nil {
 		t.Errorf("machines: %v", err)
 	}
@@ -246,4 +219,65 @@ func TestDeleteAllProfiles(t *testing.T) {
 	}
 
 	viper.Set(config.ProfileName, "")
+}
+
+// TestTryKillOne spawns a go child process that waits to be SIGKILLed,
+// then tries to execute the tryKillOne function on it;
+// if after tryKillOne the process still exists, we consider it a failure
+func TestTryKillOne(t *testing.T) {
+
+	var waitForSig = []byte(`
+package main
+
+import (
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+// This is used to unit test functions that send termination
+// signals to processes, in a cross-platform way.
+func main() {
+	ch := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	defer close(ch)
+
+	signal.Notify(ch, syscall.SIGHUP)
+	defer signal.Stop(ch)
+
+	go func() {
+		<-ch
+		close(done)
+	}()
+
+	<-done
+}
+`)
+	td := t.TempDir()
+	tmpfile := filepath.Join(td, "waitForSig.go")
+
+	if err := os.WriteFile(tmpfile, waitForSig, 0o600); err != nil {
+		t.Fatalf("copying source to %s: %v\n", tmpfile, err)
+	}
+
+	processToKill := exec.Command("go", "run", tmpfile)
+	err := processToKill.Start()
+	if err != nil {
+		t.Fatalf("while execing child process: %v\n", err)
+	}
+	pid := processToKill.Process.Pid
+
+	isMinikubeProcess = func(int) (bool, error) {
+		return true, nil
+	}
+
+	err = trySigKillProcess(pid)
+	if err != nil {
+		t.Fatalf("while trying to kill child proc %d: %v\n", pid, err)
+	}
+
+	// waiting for process to exit
+	if err := processToKill.Wait(); !strings.Contains(err.Error(), "killed") {
+		t.Fatalf("unable to kill process: %v\n", err)
+	}
 }

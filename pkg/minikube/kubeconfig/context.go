@@ -28,21 +28,35 @@ func UnsetCurrentContext(machineName string, configPath ...string) error {
 	if configPath != nil {
 		fPath = configPath[0]
 	}
-	kCfg, err := readOrNew(fPath)
+	cfg, err := readOrNew(fPath)
 	if err != nil {
 		return errors.Wrap(err, "Error getting kubeconfig status")
 	}
 
 	// Unset current-context only if profile is the current-context
-	if kCfg.CurrentContext == machineName {
-		kCfg.CurrentContext = ""
-		if err := writeToFile(kCfg, fPath); err != nil {
+	if cfg.CurrentContext == machineName {
+		cfg.CurrentContext = ""
+		if err := writeToFile(cfg, fPath); err != nil {
 			return errors.Wrap(err, "writing kubeconfig")
 		}
 		return nil
 	}
 
 	return nil
+}
+
+// GetCurrentContext gets the kubectl's current-context
+func GetCurrentContext(configPath ...string) (string, error) {
+	fPath := PathFromEnv()
+	if configPath != nil {
+		fPath = configPath[0]
+	}
+	kcfg, err := readOrNew(fPath)
+	if err != nil {
+		return "", errors.Wrap(err, "Error getting kubeconfig status")
+	}
+
+	return kcfg.CurrentContext, err
 }
 
 // SetCurrentContext sets the kubectl's current-context

@@ -142,10 +142,29 @@ func (f *FakeCommandRunner) Copy(file assets.CopyableFile) error {
 	return nil
 }
 
+// CopyFrom copy content from file to the stored map.
+func (f *FakeCommandRunner) CopyFrom(file assets.CopyableFile) error {
+	v, ok := f.fileMap.Load(file.GetSourcePath())
+	if !ok {
+		return fmt.Errorf("not found in map")
+	}
+	b := v.(bytes.Buffer)
+	_, err := io.Copy(file, &b)
+	if err != nil {
+		return errors.Wrapf(err, "error writing file: %+v", file)
+	}
+	return nil
+}
+
 // Remove removes the filename, file contents key value pair from the stored map
 func (f *FakeCommandRunner) Remove(file assets.CopyableFile) error {
 	f.fileMap.Delete(file.GetSourcePath())
 	return nil
+}
+
+// ReadableFile implements interface (without implementation)
+func (f *FakeCommandRunner) ReadableFile(_ string) (assets.ReadableFile, error) {
+	return nil, nil
 }
 
 // SetFileToContents stores the file to contents map for the FakeCommandRunner
@@ -174,7 +193,7 @@ func (f *FakeCommandRunner) GetFileToContents(filename string) (string, error) {
 
 func (f *FakeCommandRunner) commands() []string {
 	cmds := []string{}
-	f.cmdMap.Range(func(k, v interface{}) bool {
+	f.cmdMap.Range(func(k, _ interface{}) bool {
 		cmds = append(cmds, fmt.Sprintf("%s", k))
 		return true
 	})
@@ -189,7 +208,7 @@ func (f *FakeCommandRunner) DumpMaps(w io.Writer) {
 		return true
 	})
 	fmt.Fprintln(w, "Filenames: ")
-	f.fileMap.Range(func(k, v interface{}) bool {
+	f.fileMap.Range(func(k, _ interface{}) bool {
 		fmt.Fprint(w, k)
 		return true
 	})

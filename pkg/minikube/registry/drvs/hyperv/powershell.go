@@ -1,4 +1,4 @@
-// +build windows
+//go:build windows
 
 /*
 Copyright 2018 The Kubernetes Authors All rights reserved.
@@ -61,6 +61,9 @@ func parseLines(stdout string) []string {
 	s := bufio.NewScanner(strings.NewReader(stdout))
 	for s.Scan() {
 		resp = append(resp, s.Text())
+	}
+	if err := s.Err(); err != nil {
+		klog.Warningf("failed to read stdout: %v", err)
 	}
 
 	return resp

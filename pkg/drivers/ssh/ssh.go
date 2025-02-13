@@ -18,12 +18,12 @@ package ssh
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -110,7 +110,7 @@ func (d *Driver) PreCreateCheck() error {
 			return fmt.Errorf("SSH key does not exist: %q", d.SSHKey)
 		}
 
-		key, err := ioutil.ReadFile(d.SSHKey)
+		key, err := os.ReadFile(d.SSHKey)
 		if err != nil {
 			return err
 		}
@@ -142,8 +142,14 @@ func (d *Driver) Create() error {
 	}
 
 	if d.runtime.Name() == "Docker" {
-		if _, err := d.exec.RunCmd(exec.Command("sudo", "usermod", "-aG", "docker", d.GetSSHUsername())); err != nil {
-			return errors.Wrap(err, "usermod")
+		groups, err := d.exec.RunCmd(exec.Command("groups", d.GetSSHUsername()))
+		if err != nil {
+			return errors.Wrap(err, "groups")
+		}
+		if !strings.Contains(groups.Stdout.String(), "docker") {
+			if _, err := d.exec.RunCmd(exec.Command("sudo", "usermod", "-aG", "docker", d.GetSSHUsername())); err != nil {
+				return errors.Wrap(err, "usermod")
+			}
 		}
 	}
 
@@ -206,10 +212,7 @@ func (d *Driver) Stop() error {
 
 // Restart a host
 func (d *Driver) Restart() error {
-	if err := sysinit.New(d.exec).Restart("kubelet"); err != nil {
-		return err
-	}
-	return nil
+	return sysinit.New(d.exec).Restart("kubelet")
 }
 
 // Kill stops a host forcefully, including any containers that we are managing.

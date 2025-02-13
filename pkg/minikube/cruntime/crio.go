@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,17 +31,17 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/bootstrapper/images"
-	"k8s.io/minikube/pkg/minikube/cni"
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/download"
 	"k8s.io/minikube/pkg/minikube/style"
 	"k8s.io/minikube/pkg/minikube/sysinit"
 )
 
 const (
-	// CRIOConfFile is the path to the CRI-O configuration
-	crioConfigFile = "/etc/crio/crio.conf"
+	// crioConfigFile is the path to the CRI-O configuration
+	crioConfigFile = "/etc/crio/crio.conf.d/02-crio.conf"
 )
 
 // CRIO contains CRIO runtime state
@@ -52,20 +53,57 @@ type CRIO struct {
 	Init              sysinit.Manager
 }
 
-// generateCRIOConfig sets up /etc/crio/crio.conf
-func generateCRIOConfig(cr CommandRunner, imageRepository string, kv semver.Version) error {
-	cPath := crioConfigFile
+// generateCRIOConfig sets up pause image and cgroup manager for cri-o in crioConfigFile
+func generateCRIOConfig(cr CommandRunner, imageRepository string, kv semver.Version, cgroupDriver string) error {
 	pauseImage := images.Pause(kv, imageRepository)
-
-	c := exec.Command("/bin/bash", "-c", fmt.Sprintf("sudo sed -e 's|^pause_image = .*$|pause_image = \"%s\"|' -i %s", pauseImage, cPath))
+	klog.Infof("configure cri-o to use %q pause image...", pauseImage)
+	c := exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i 's|^.*pause_image = .*$|pause_image = %q|' %s`, pauseImage, crioConfigFile))
 	if _, err := cr.RunCmd(c); err != nil {
-		return errors.Wrap(err, "generateCRIOConfig.")
+		return errors.Wrap(err, "update pause_image")
 	}
 
-	if cni.Network != "" {
-		klog.Infof("Updating CRIO to use the custom CNI network %q", cni.Network)
-		if _, err := cr.RunCmd(exec.Command("/bin/bash", "-c", fmt.Sprintf("sudo sed -e 's|^.*cni_default_network = .*$|cni_default_network = \"%s\"|' -i %s", cni.Network, crioConfigFile))); err != nil {
-			return errors.Wrap(err, "update network_dir")
+	// configure cgroup driver
+	if cgroupDriver == constants.UnknownCgroupDriver {
+		klog.Warningf("unable to configure cri-o to use unknown cgroup driver, will use default %q instead", constants.DefaultCgroupDriver)
+		cgroupDriver = constants.DefaultCgroupDriver
+	}
+	klog.Infof("configuring cri-o to use %q as cgroup driver...", cgroupDriver)
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i 's|^.*cgroup_manager = .*$|cgroup_manager = %q|' %s`, cgroupDriver, crioConfigFile))); err != nil {
+		return errors.Wrap(err, "configuring cgroup_manager")
+	}
+	// explicitly set conmon_cgroup to avoid errors like:
+	// - level=fatal msg="Validating runtime config: conmon cgroup should be 'pod' or a systemd slice"
+	// - level=fatal msg="Validating runtime config: cgroupfs manager conmon cgroup should be 'pod' or empty"
+	// ref: https://github.com/cri-o/cri-o/pull/3940
+	// ref: https://github.com/cri-o/cri-o/issues/6047
+	// ref: https://kubernetes.io/docs/setup/production-environment/container-runtimes/#cgroup-driver
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i '/conmon_cgroup = .*/d' %s`, crioConfigFile))); err != nil {
+		return errors.Wrap(err, "removing conmon_cgroup")
+	}
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i '/cgroup_manager = .*/a conmon_cgroup = %q' %s`, "pod", crioConfigFile))); err != nil {
+		return errors.Wrap(err, "configuring conmon_cgroup")
+	}
+
+	// we might still want to try removing '/etc/cni/net.mk' in case of upgrade from previous minikube version that had/used it
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", `sudo rm -rf /etc/cni/net.mk`)); err != nil {
+		klog.Warningf("unable to remove /etc/cni/net.mk directory: %v", err)
+	}
+
+	// add 'net.ipv4.ip_unprivileged_port_start=0' sysctl so that containers that run with non-root user can bind to otherwise privilege ports (like coredns v1.11.0+)
+	// note: 'net.ipv4.ip_unprivileged_port_start' sysctl was marked as safe since Kubernetes v1.22 (Aug 4, 2021) (ref: https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.22.md#feature-9)
+	// note: cri-o supports 'default_sysctls' option since v1.12.0 (Oct 19, 2018) (ref: https://github.com/cri-o/cri-o/releases/tag/v1.12.0; https://github.com/cri-o/cri-o/pull/1721)
+	if kv.GTE(semver.Version{Major: 1, Minor: 22}) {
+		// remove any existing 'net.ipv4.ip_unprivileged_port_start' settings
+		if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i '/^ *"net.ipv4.ip_unprivileged_port_start=.*"/d' %s`, crioConfigFile))); err != nil {
+			return errors.Wrap(err, "removing net.ipv4.ip_unprivileged_port_start")
+		}
+		// insert 'default_sysctls' list, if not already present
+		if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo grep -q "^ *default_sysctls" %s || sudo sed -i '/conmon_cgroup = .*/a default_sysctls = \[\n\]' %s`, crioConfigFile, crioConfigFile))); err != nil {
+			return errors.Wrap(err, "inserting default_sysctls")
+		}
+		// add 'net.ipv4.ip_unprivileged_port_start' to 'default_sysctls' list
+		if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i -r 's|^default_sysctls *= *\[|&\n  "net.ipv4.ip_unprivileged_port_start=0",|' %s`, crioConfigFile))); err != nil {
+			return errors.Wrap(err, "configuring net.ipv4.ip_unprivileged_port_start")
 		}
 	}
 
@@ -87,7 +125,7 @@ func (r *CRIO) Version() (string, error) {
 	c := exec.Command("crio", "--version")
 	rr, err := r.Runner.RunCmd(c)
 	if err != nil {
-		return "", errors.Wrap(err, "crio version.")
+		return "", errors.Wrap(err, "crio version")
 	}
 
 	// crio version 1.13.0
@@ -108,9 +146,9 @@ func (r *CRIO) SocketPath() string {
 func (r *CRIO) Available() error {
 	c := exec.Command("which", "crio")
 	if _, err := r.Runner.RunCmd(c); err != nil {
-		return errors.Wrapf(err, "check crio available.")
+		return errors.Wrapf(err, "check crio available")
 	}
-	return nil
+	return checkCNIPlugins(r.KubernetesVersion)
 }
 
 // Active returns if CRIO is active on the host
@@ -138,8 +176,45 @@ func enableIPForwarding(cr CommandRunner) error {
 	return nil
 }
 
+// enableRootless enables configurations for running CRI-O in Rootless Docker.
+//
+// 1. Create /etc/systemd/system/crio.service.d/10-rootless.conf to set _CRIO_ROOTLESS=1
+// 2. Reload systemd
+//
+// See https://kubernetes.io/docs/tasks/administer-cluster/kubelet-in-userns/#configuring-cri
+func (r *CRIO) enableRootless() error {
+	files := map[string]string{
+		"/etc/systemd/system/crio.service.d/10-rootless.conf": `[Service]
+Environment="_CRIO_ROOTLESS=1"
+`,
+	}
+	for target, content := range files {
+		targetDir := filepath.Dir(target)
+		c := exec.Command("sudo", "mkdir", "-p", targetDir)
+		if _, err := r.Runner.RunCmd(c); err != nil {
+			return errors.Wrapf(err, "failed to create directory %q", targetDir)
+		}
+		asset := assets.NewMemoryAssetTarget([]byte(content), target, "0644")
+		err := r.Runner.Copy(asset)
+		asset.Close()
+		if err != nil {
+			return errors.Wrapf(err, "failed to create %q", target)
+		}
+	}
+	// reload systemd to apply our changes on /etc/systemd
+	if err := r.Init.Reload("crio"); err != nil {
+		return err
+	}
+	if r.Init.Active("crio") {
+		if err := r.Init.Restart("crio"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Enable idempotently enables CRIO on a host
-func (r *CRIO) Enable(disOthers, _ bool) error {
+func (r *CRIO) Enable(disOthers bool, cgroupDriver string, inUserNamespace bool) error {
 	if disOthers {
 		if err := disableOthers(r, r.Runner); err != nil {
 			klog.Warningf("disableOthers: %v", err)
@@ -148,13 +223,27 @@ func (r *CRIO) Enable(disOthers, _ bool) error {
 	if err := populateCRIConfig(r.Runner, r.SocketPath()); err != nil {
 		return err
 	}
-	if err := generateCRIOConfig(r.Runner, r.ImageRepository, r.KubernetesVersion); err != nil {
+	if err := generateCRIOConfig(r.Runner, r.ImageRepository, r.KubernetesVersion, cgroupDriver); err != nil {
 		return err
 	}
 	if err := enableIPForwarding(r.Runner); err != nil {
 		return err
 	}
-	return r.Init.Start("crio")
+	if inUserNamespace {
+		if err := CheckKernelCompatibility(r.Runner, 5, 11); err != nil {
+			// For using overlayfs
+			return fmt.Errorf("kernel >= 5.11 is required for rootless mode: %w", err)
+		}
+		if err := CheckKernelCompatibility(r.Runner, 5, 13); err != nil {
+			// For avoiding SELinux error with overlayfs
+			klog.Warningf("kernel >= 5.13 is recommended for rootless mode %v", err)
+		}
+		if err := r.enableRootless(); err != nil {
+			return err
+		}
+	}
+	// NOTE: before we start crio explicitly here, crio might be already started automatically
+	return r.Init.Restart("crio")
 }
 
 // Disable idempotently disables CRIO on a host
@@ -162,7 +251,7 @@ func (r *CRIO) Disable() error {
 	return r.Init.ForceStop("crio")
 }
 
-// ImageExists checks if an image exists
+// ImageExists checks if image exists based on image name and optionally image sha
 func (r *CRIO) ImageExists(name string, sha string) bool {
 	// expected output looks like [NAME@sha256:SHA]
 	c := exec.Command("sudo", "podman", "image", "inspect", "--format", "{{.Id}}", name)
@@ -170,20 +259,15 @@ func (r *CRIO) ImageExists(name string, sha string) bool {
 	if err != nil {
 		return false
 	}
-	if !strings.Contains(rr.Output(), sha) {
+	if sha != "" && !strings.Contains(rr.Output(), sha) {
 		return false
 	}
 	return true
 }
 
 // ListImages returns a list of images managed by this container runtime
-func (r *CRIO) ListImages(ListImagesOptions) ([]string, error) {
-	c := exec.Command("sudo", "podman", "images", "--format", "{{.Repository}}:{{.Tag}}")
-	rr, err := r.Runner.RunCmd(c)
-	if err != nil {
-		return nil, errors.Wrapf(err, "podman images")
-	}
-	return strings.Split(strings.TrimSpace(rr.Stdout.String()), "\n"), nil
+func (r *CRIO) ListImages(ListImagesOptions) ([]ListImage, error) {
+	return listCRIImages(r.Runner)
 }
 
 // LoadImage loads an image into this runtime
@@ -216,6 +300,16 @@ func (r *CRIO) RemoveImage(name string) error {
 	return removeCRIImage(r.Runner, name)
 }
 
+// TagImage tags an image in this runtime
+func (r *CRIO) TagImage(source string, target string) error {
+	klog.Infof("Tagging image %s: %s", source, target)
+	c := exec.Command("sudo", "podman", "tag", source, target)
+	if _, err := r.Runner.RunCmd(c); err != nil {
+		return errors.Wrap(err, "crio tag image")
+	}
+	return nil
+}
+
 // BuildImage builds an image into this runtime
 func (r *CRIO) BuildImage(src string, file string, tag string, push bool, env []string, opts []string) error {
 	klog.Infof("Building image: %s", src)
@@ -230,6 +324,7 @@ func (r *CRIO) BuildImage(src string, file string, tag string, push bool, env []
 	for _, opt := range opts {
 		args = append(args, "--"+opt)
 	}
+	args = append(args, "--cgroup-manager=cgroupfs")
 	c := exec.Command("sudo", args...)
 	e := os.Environ()
 	e = append(e, env...)
@@ -250,6 +345,16 @@ func (r *CRIO) BuildImage(src string, file string, tag string, push bool, env []
 	return nil
 }
 
+// PushImage pushes an image
+func (r *CRIO) PushImage(name string) error {
+	klog.Infof("Pushing image %s", name)
+	c := exec.Command("sudo", "podman", "push", name)
+	if _, err := r.Runner.RunCmd(c); err != nil {
+		return errors.Wrap(err, "crio push image")
+	}
+	return nil
+}
+
 // CGroupDriver returns cgroup driver ("cgroupfs" or "systemd")
 func (r *CRIO) CGroupDriver() (string, error) {
 	c := exec.Command("crio", "config")
@@ -257,7 +362,7 @@ func (r *CRIO) CGroupDriver() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cgroupManager := "cgroupfs" // default
+	cgroupManager := "systemd" // default
 	for _, line := range strings.Split(rr.Stdout.String(), "\n") {
 		if strings.HasPrefix(line, "cgroup_manager") {
 			// cgroup_manager = "cgroupfs"
@@ -272,12 +377,7 @@ func (r *CRIO) CGroupDriver() (string, error) {
 
 // KubeletOptions returns kubelet options for a runtime.
 func (r *CRIO) KubeletOptions() map[string]string {
-	return map[string]string{
-		"container-runtime":          "remote",
-		"container-runtime-endpoint": r.SocketPath(),
-		"image-service-endpoint":     r.SocketPath(),
-		"runtime-request-timeout":    "15m",
-	}
+	return kubeletCRIOptions(r, r.KubernetesVersion)
 }
 
 // ListContainers returns a list of managed by this container runtime
@@ -306,13 +406,13 @@ func (r *CRIO) StopContainers(ids []string) error {
 }
 
 // ContainerLogCmd returns the command to retrieve the log for a container based on ID
-func (r *CRIO) ContainerLogCmd(id string, len int, follow bool) string {
-	return criContainerLogCmd(r.Runner, id, len, follow)
+func (r *CRIO) ContainerLogCmd(id string, length int, follow bool) string {
+	return criContainerLogCmd(r.Runner, id, length, follow)
 }
 
 // SystemLogCmd returns the command to retrieve system logs
-func (r *CRIO) SystemLogCmd(len int) string {
-	return fmt.Sprintf("sudo journalctl -u crio -n %d", len)
+func (r *CRIO) SystemLogCmd(length int) string {
+	return fmt.Sprintf("sudo journalctl -u crio -n %d", length)
 }
 
 // Preload preloads the container runtime with k8s images
@@ -359,14 +459,14 @@ func (r *CRIO) Preload(cc config.ClusterConfig) error {
 	if err := r.Runner.Copy(fa); err != nil {
 		return errors.Wrap(err, "copying file")
 	}
-	klog.Infof("Took %f seconds to copy over tarball", time.Since(t).Seconds())
+	klog.Infof("duration metric: took %s to copy over tarball", time.Since(t))
 
 	t = time.Now()
 	// extract the tarball to /var in the VM
-	if rr, err := r.Runner.RunCmd(exec.Command("sudo", "tar", "-I", "lz4", "-C", "/var", "-xf", dest)); err != nil {
+	if rr, err := r.Runner.RunCmd(exec.Command("sudo", "tar", "--xattrs", "--xattrs-include", "security.capability", "-I", "lz4", "-C", "/var", "-xf", dest)); err != nil {
 		return errors.Wrapf(err, "extracting tarball: %s", rr.Output())
 	}
-	klog.Infof("Took %f seconds t extract the tarball", time.Since(t).Seconds())
+	klog.Infof("duration metric: took %s to extract the tarball", time.Since(t))
 
 	//  remove the tarball in the VM
 	if err := r.Runner.Remove(fa); err != nil {
@@ -381,16 +481,6 @@ func crioImagesPreloaded(runner command.Runner, images []string) bool {
 	rr, err := runner.RunCmd(exec.Command("sudo", "crictl", "images", "--output", "json"))
 	if err != nil {
 		return false
-	}
-	type crictlImages struct {
-		Images []struct {
-			ID          string      `json:"id"`
-			RepoTags    []string    `json:"repoTags"`
-			RepoDigests []string    `json:"repoDigests"`
-			Size        string      `json:"size"`
-			UID         interface{} `json:"uid"`
-			Username    string      `json:"username"`
-		} `json:"images"`
 	}
 
 	var jsonImages crictlImages

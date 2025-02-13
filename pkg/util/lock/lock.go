@@ -19,18 +19,17 @@ package lock
 import (
 	"crypto/sha1"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/mutex"
+	"github.com/juju/mutex/v2"
 	"github.com/pkg/errors"
 
 	"k8s.io/klog/v2"
 )
 
-// WriteFile decorates ioutil.WriteFile with a file lock and retry
+// WriteFile decorates os.WriteFile with a file lock and retry
 func WriteFile(filename string, data []byte, perm os.FileMode) error {
 	spec := PathMutexSpec(filename)
 	klog.Infof("WriteFile acquiring %s: %+v", filename, spec)
@@ -41,7 +40,28 @@ func WriteFile(filename string, data []byte, perm os.FileMode) error {
 
 	defer releaser.Release()
 
-	return ioutil.WriteFile(filename, data, perm)
+	return os.WriteFile(filename, data, perm)
+}
+
+// AppendToFile appends DATA bytes to the specified FILENAME in a mutually exclusive way.
+// The file is created if it does not exist, using the specified PERM (before umask)
+func AppendToFile(filename string, data []byte, perm os.FileMode) error {
+	spec := PathMutexSpec(filename)
+	klog.Infof("WriteFile acquiring %s: %+v", filename, spec)
+	releaser, err := mutex.Acquire(spec)
+	if err != nil {
+		return errors.Wrapf(err, "failed to acquire lock for %s: %+v", filename, spec)
+	}
+
+	defer releaser.Release()
+
+	fd, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, perm)
+	if err != nil {
+		return errors.Wrapf(err, "failed to open %s: %+v", filename, spec)
+	}
+
+	_, err = fd.Write(data)
+	return err
 }
 
 // PathMutexSpec returns a mutex spec for a path

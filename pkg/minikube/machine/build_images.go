@@ -25,6 +25,8 @@ import (
 	"runtime"
 	"strings"
 
+	dockerref "github.com/distribution/reference"
+
 	"github.com/docker/machine/libmachine/state"
 	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
@@ -40,7 +42,7 @@ import (
 var buildRoot = path.Join(vmpath.GuestPersistentDir, "build")
 
 // BuildImage builds image to all profiles
-func BuildImage(path string, file string, tag string, push bool, env []string, opt []string, profiles []*config.Profile) error {
+func BuildImage(path string, file string, tag string, push bool, env []string, opt []string, profiles []*config.Profile, allNodes bool, nodeName string) error {
 	api, err := NewAPIClient()
 	if err != nil {
 		return errors.Wrap(err, "api")
@@ -59,6 +61,14 @@ func BuildImage(path string, file string, tag string, push bool, env []string, o
 		remote = false
 	}
 
+	if tag != "" {
+		named, err := dockerref.ParseNormalizedNamed(tag)
+		if err != nil {
+			return errors.Wrapf(err, "couldn't parse image reference %q", tag)
+		}
+		tag = named.String()
+	}
+
 	for _, p := range profiles { // building images to all running profiles
 		pName := p.Name // capture the loop variable
 
@@ -70,8 +80,22 @@ func BuildImage(path string, file string, tag string, push bool, env []string, o
 			continue
 		}
 
+		cp, err := config.ControlPlane(*p.Config)
+		if err != nil {
+			return err
+		}
+
 		for _, n := range c.Nodes {
 			m := config.MachineName(*c, n)
+
+			if !allNodes {
+				// build images on the control-plane node by default
+				if nodeName == "" && n != cp {
+					continue
+				} else if nodeName != n.Name && nodeName != m {
+					continue
+				}
+			}
 
 			status, err := Status(api, m)
 			if err != nil {

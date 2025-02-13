@@ -36,9 +36,9 @@ var FOLDER = "site/static/images/benchmarks/cpuUsage/idleOnly"
 
 type integerTicks struct{}
 
-func (integerTicks) Ticks(min, max float64) []plot.Tick {
+func (integerTicks) Ticks(minimum, maximum float64) []plot.Tick {
 	var t []plot.Tick
-	for i := math.Trunc(min); i <= max; i += 50 {
+	for i := math.Trunc(minimum); i <= maximum; i += 50 {
 		t = append(t, plot.Tick{Value: i, Label: fmt.Sprint(i)})
 	}
 	return t
@@ -53,10 +53,10 @@ func main() {
 
 func execute() error {
 	// sessionID is generated and used at cpu usage benchmark
-	sessionID := os.Args[1]
-	if len(sessionID) == 0 {
+	if len(os.Args) <= 1 || len(os.Args[1]) == 0 {
 		return errors.New("Please identify sessionID")
 	}
+	sessionID := os.Args[1]
 
 	// Create plot instance
 	p := plot.New()
@@ -71,7 +71,7 @@ func execute() error {
 
 	// Open csv file of benchmark summary
 	results := []float64{}
-	var fn string = "./out/benchmark-results/" + sessionID + "/cstat.summary"
+	fn := "./out/benchmark-results/" + sessionID + "/cstat.summary"
 	file, err := os.Open(fn)
 	if err != nil {
 		return errors.Wrap(err, "Missing summary csv")

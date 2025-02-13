@@ -98,14 +98,11 @@ func crUpdate(ctx context.Context, reg registry, image, version string) error {
 // TagImage tags local image:current with stable version, and returns any error occurred.
 func TagImage(ctx context.Context, image, current, stable string) error {
 	tag := exec.CommandContext(ctx, "docker", "tag", image+":"+current, image+":"+stable)
-	if err := RunWithRetryNotify(ctx, tag, nil, 1*time.Second, 10); err != nil {
-		return err
-	}
-	return nil
+	return RunWithRetryNotify(ctx, tag, nil, 1*time.Second, 10)
 }
 
 // PullImage checks if current image exists locally, tries to pull it if not, and returns reference image url and any error occurred.
-func PullImage(ctx context.Context, current, release string) (image string, err error) {
+func PullImage(ctx context.Context, current string) (image string, err error) {
 	// check if image exists locally
 	for _, reg := range registries {
 		inspect := exec.CommandContext(ctx, "docker", "inspect", reg.image+":"+current, "--format", "{{.Id}}")

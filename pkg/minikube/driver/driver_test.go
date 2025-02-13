@@ -18,7 +18,6 @@ package driver
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -31,19 +30,19 @@ func TestSupportedDrivers(t *testing.T) {
 	got := SupportedDrivers()
 	found := false
 	for _, s := range SupportedDrivers() {
-		if s == VirtualBox {
+		if s == SSH {
 			found = true
 		}
 	}
 
 	if found == false {
-		t.Errorf("%s not in supported drivers: %v", VirtualBox, got)
+		t.Errorf("%s not in supported drivers: %v", SSH, got)
 	}
 }
 
 func TestSupported(t *testing.T) {
-	if !Supported(VirtualBox) {
-		t.Errorf("Supported(%s) is false", VirtualBox)
+	if !Supported(SSH) {
+		t.Errorf("Supported(%s) is false", SSH)
 	}
 	if Supported("yabba?") {
 		t.Errorf("Supported(yabba?) is true")
@@ -61,18 +60,20 @@ func TestBareMetal(t *testing.T) {
 
 func TestMachineType(t *testing.T) {
 	types := map[string]string{
-		Podman:       "container",
-		Docker:       "container",
-		Mock:         "bare metal machine",
-		None:         "bare metal machine",
-		SSH:          "bare metal machine",
-		KVM2:         "VM",
-		VirtualBox:   "VM",
-		HyperKit:     "VM",
-		VMware:       "VM",
-		VMwareFusion: "VM",
-		HyperV:       "VM",
-		Parallels:    "VM",
+		Podman:     "container",
+		Docker:     "container",
+		Mock:       "bare metal machine",
+		None:       "bare metal machine",
+		SSH:        "bare metal machine",
+		KVM2:       "VM",
+		QEMU2:      "VM",
+		QEMU:       "VM",
+		VFKit:      "VM",
+		VirtualBox: "VM",
+		HyperKit:   "VM",
+		VMware:     "VM",
+		HyperV:     "VM",
+		Parallels:  "VM",
 	}
 
 	drivers := SupportedDrivers()
@@ -91,7 +92,7 @@ func TestFlagDefaults(t *testing.T) {
 		t.Errorf("defaults mismatch (-want +got):\n%s", diff)
 	}
 
-	tf, err := ioutil.TempFile("", "resolv.conf")
+	tf, err := os.CreateTemp("", "resolv.conf")
 	if err != nil {
 		t.Fatalf("tempfile: %v", err)
 	}

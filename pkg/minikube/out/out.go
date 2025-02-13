@@ -21,21 +21,20 @@ import (
 	"bytes"
 	"fmt"
 	"html"
-	"html/template"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/Delta456/box-cli-maker/v2"
 	"github.com/briandowns/spinner"
 	"github.com/mattn/go-isatty"
+	"github.com/spf13/pflag"
 
 	"k8s.io/klog/v2"
-	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/out/register"
 	"k8s.io/minikube/pkg/minikube/style"
 	"k8s.io/minikube/pkg/minikube/translate"
@@ -95,6 +94,7 @@ func Step(st style.Enum, format string, a ...V) {
 	outStyled, _ := stylized(st, useColor, format, a...)
 	if JSON {
 		register.PrintStep(outStyled)
+		klog.Info(outStyled)
 		return
 	}
 	register.RecordStep(outStyled)
@@ -118,7 +118,7 @@ func Styled(st style.Enum, format string, a ...V) {
 func boxedCommon(printFunc func(format string, a ...interface{}), cfg box.Config, title string, format string, a ...V) {
 	box := box.New(cfg)
 	if !useColor {
-		box.Config.Color = ""
+		box.Config.Color = nil
 	}
 	str := Sprintf(style.None, format, a...)
 	printFunc(box.String(title, strings.TrimSpace(str)))
@@ -126,22 +126,22 @@ func boxedCommon(printFunc func(format string, a ...interface{}), cfg box.Config
 
 // Boxed writes a stylized and templated message in a box to stdout using the default style config
 func Boxed(format string, a ...V) {
-	boxedCommon(String, defaultBoxCfg, "", format, a...)
+	boxedCommon(Stringf, defaultBoxCfg, "", format, a...)
 }
 
 // BoxedErr writes a stylized and templated message in a box to stderr using the default style config
 func BoxedErr(format string, a ...V) {
-	boxedCommon(Err, defaultBoxCfg, "", format, a...)
+	boxedCommon(Errf, defaultBoxCfg, "", format, a...)
 }
 
 // BoxedWithConfig writes a templated message in a box with customized style config to stdout
-func BoxedWithConfig(cfg box.Config, st style.Enum, title string, format string, a ...V) {
+func BoxedWithConfig(cfg box.Config, st style.Enum, title string, text string, a ...V) {
 	if st != style.None {
 		title = Sprintf(st, title)
 	}
 	// need to make sure no newlines are in the title otherwise box-cli-maker panics
 	title = strings.ReplaceAll(title, "\n", "")
-	boxedCommon(String, cfg, title, format, a...)
+	boxedCommon(Stringf, cfg, title, text, a...)
 }
 
 // Sprintf is used for returning the string (doesn't write anything)
@@ -155,17 +155,41 @@ func Infof(format string, a ...V) {
 	outStyled, _ := stylized(style.Option, useColor, format, a...)
 	if JSON {
 		register.PrintInfo(outStyled)
-		return
 	}
 	String(outStyled)
 }
 
-// String writes a basic formatted string to stdout
-func String(format string, a ...interface{}) {
+// String writes a basic string to stdout
+func String(s string) {
 	// Flush log buffer so that output order makes sense
 	klog.Flush()
+	defer klog.Flush()
 
-	if silent {
+	if silent || JSON {
+		klog.Info(s)
+		return
+	}
+
+	if outFile == nil {
+		klog.Warningf("[unset outFile]: %s", s)
+		return
+	}
+	klog.Info(s)
+	// if spin is active from a previous step, it will stop spinner displaying
+	if spin.Active() {
+		spin.Stop()
+	}
+
+	Output(outFile, s)
+}
+
+// String writes a basic formatted string to stdout
+func Stringf(format string, a ...interface{}) {
+	// Flush log buffer so that output order makes sense
+	klog.Flush()
+	defer klog.Flush()
+
+	if silent || JSON {
 		klog.Infof(format, a...)
 		return
 	}
@@ -180,11 +204,18 @@ func String(format string, a ...interface{}) {
 		spin.Stop()
 	}
 
-	Output(outFile, format, a...)
+	Outputf(outFile, format, a...)
 }
 
-// Output writes a basic formatted string
-func Output(file fdWriter, format string, a ...interface{}) {
+// Output writes a basic string
+func Output(file fdWriter, s string) {
+	if _, err := fmt.Fprint(file, s); err != nil {
+		klog.Errorf("Fprint failed: %v", err)
+	}
+}
+
+// Outputf writes a basic formatted string
+func Outputf(file fdWriter, format string, a ...interface{}) {
 	_, err := fmt.Fprintf(file, format, a...)
 	if err != nil {
 		klog.Errorf("Fprintf failed: %v", err)
@@ -192,32 +223,28 @@ func Output(file fdWriter, format string, a ...interface{}) {
 }
 
 // spinnerString writes a basic formatted string to stdout with spinner character
-func spinnerString(format string, a ...interface{}) {
+func spinnerString(s string) {
 	// Flush log buffer so that output order makes sense
 	klog.Flush()
 
 	if outFile == nil {
-		klog.Warningf("[unset outFile]: %s", fmt.Sprintf(format, a...))
+		klog.Warningf("[unset outFile]: %s", s)
 		return
 	}
 
-	klog.Infof(format, a...)
+	klog.Info(s)
 	// if spin is active from a previous step, it will stop spinner displaying
 	if spin.Active() {
 		spin.Stop()
 	}
-	Output(outFile, format, a...)
+	Output(outFile, s)
 	// Start spinning at the end of the printed line
 	spin.Start()
 }
 
 // Ln writes a basic formatted string with a newline to stdout
 func Ln(format string, a ...interface{}) {
-	if JSON {
-		klog.Warningf("please use out.T to log steps in JSON")
-		return
-	}
-	String(format+"\n", a...)
+	Stringf(format+"\n", a...)
 }
 
 // ErrT writes a stylized and templated error message to stderr
@@ -226,10 +253,34 @@ func ErrT(st style.Enum, format string, a ...V) {
 	Err(errStyled)
 }
 
-// Err writes a basic formatted string to stderr
-func Err(format string, a ...interface{}) {
+// Err writes a basic string to stderr
+func Err(s string) {
+	if JSON {
+		register.PrintError(s)
+		klog.Warning(s)
+		return
+	}
+	register.RecordError(s)
+
+	if errFile == nil {
+		klog.Errorf("[unset errFile]: %s", s)
+		return
+	}
+
+	klog.Warning(s)
+
+	// if spin is active from a previous step, it will stop spinner displaying
+	if spin.Active() {
+		spin.Stop()
+	}
+	Output(errFile, s)
+}
+
+// Errf writes a basic formatted string to stderr
+func Errf(format string, a ...interface{}) {
 	if JSON {
 		register.PrintError(format)
+		klog.Warningf(format, a...)
 		return
 	}
 	register.RecordError(format)
@@ -245,22 +296,17 @@ func Err(format string, a ...interface{}) {
 	if spin.Active() {
 		spin.Stop()
 	}
-	Output(errFile, format, a...)
+	Outputf(errFile, format, a...)
 }
 
 // ErrLn writes a basic formatted string with a newline to stderr
 func ErrLn(format string, a ...interface{}) {
-	Err(format+"\n", a...)
+	Errf(format+"\n", a...)
 }
 
 // SuccessT is a shortcut for writing a templated success message to stdout
 func SuccessT(format string, a ...V) {
 	Step(style.Success, format, a...)
-}
-
-// FatalT is a shortcut for writing a templated fatal message to stderr
-func FatalT(format string, a ...V) {
-	ErrT(style.Fatal, format, a...)
 }
 
 // WarningT is a shortcut for writing a templated warning message to stderr
@@ -272,6 +318,7 @@ func WarningT(format string, a ...V) {
 		}
 		st, _ := stylized(style.Warning, useColor, format, a...)
 		register.PrintWarning(st)
+		klog.Warning(st)
 		return
 	}
 	ErrT(style.Warning, format, a...)
@@ -368,29 +415,21 @@ func LogEntries(msg string, err error, entries map[string][]string) {
 
 // displayError prints the error and displays the standard minikube error messaging
 func displayError(msg string, err error) {
-	klog.Warningf(fmt.Sprintf("%s: %v", msg, err))
+	klog.Warningf("%s: %v", msg, err)
 	if JSON {
-		FatalT("{{.msg}}: {{.err}}", V{"msg": translate.T(msg), "err": err})
+		ErrT(style.Fatal, "{{.msg}}: {{.err}}", V{"msg": translate.T(msg), "err": err})
 		return
 	}
 	// use Warning because Error will display a duplicate message to stderr
 	ErrT(style.Empty, "")
-	FatalT("{{.msg}}: {{.err}}", V{"msg": translate.T(msg), "err": err})
+	ErrT(style.Fatal, "{{.msg}}: {{.err}}", V{"msg": translate.T(msg), "err": err})
 	ErrT(style.Empty, "")
 	displayGitHubIssueMessage()
 }
 
 func latestLogFilePath() (string, error) {
-	if len(os.Args) < 2 {
-		return "", fmt.Errorf("unable to detect command")
-	}
-	cmd := os.Args[1]
-	if cmd == "start" {
-		return localpath.LastStartLog(), nil
-	}
-
 	tmpdir := os.TempDir()
-	files, err := ioutil.ReadDir(tmpdir)
+	files, err := os.ReadDir(tmpdir)
 	if err != nil {
 		return "", fmt.Errorf("failed to get list of files in tempdir: %v", err)
 	}
@@ -400,27 +439,47 @@ func latestLogFilePath() (string, error) {
 		if !strings.Contains(file.Name(), "minikube_") {
 			continue
 		}
-		if !lastModTime.IsZero() && lastModTime.After(file.ModTime()) {
+		fileInfo, err := file.Info()
+		if err != nil {
+			return "", fmt.Errorf("failed to get file info: %v", err)
+		}
+		if !lastModTime.IsZero() && lastModTime.After(fileInfo.ModTime()) {
 			continue
 		}
 		lastModName = file.Name()
-		lastModTime = file.ModTime()
+		lastModTime = fileInfo.ModTime()
 	}
 	fullPath := filepath.Join(tmpdir, lastModName)
 
 	return fullPath, nil
 }
 
+func command() (string, error) {
+	if len(pflag.Args()) < 1 {
+		return "", fmt.Errorf("unable to detect command")
+	}
+
+	return pflag.Arg(0), nil
+}
+
 func displayGitHubIssueMessage() {
-	logPath, err := latestLogFilePath()
+	cmd, err := command()
 	if err != nil {
-		klog.Warningf("failed to diplay GitHub issue message: %v", err)
+		klog.Warningf("failed to get command: %v", err)
 	}
 
 	msg := Sprintf(style.Sad, "If the above advice does not help, please let us know:")
 	msg += Sprintf(style.URL, "https://github.com/kubernetes/minikube/issues/new/choose\n")
-	msg += Sprintf(style.Empty, "Please attach the following file to the GitHub issue:")
-	msg += Sprintf(style.Empty, "- {{.logPath}}", V{"logPath": logPath})
+	msg += Sprintf(style.Empty, "Please run `minikube logs --file=logs.txt` and attach logs.txt to the GitHub issue.")
+
+	if cmd != "start" {
+		logPath, err := latestLogFilePath()
+		if err != nil {
+			klog.Warningf("failed to get latest log file path: %v", err)
+		}
+		msg += Sprintf(style.Empty, "Please also attach the following file to the GitHub issue:")
+		msg += Sprintf(style.Empty, "- {{.logPath}}", V{"logPath": logPath})
+	}
 
 	BoxedErr(msg)
 }
@@ -447,12 +506,6 @@ func applyTmpl(format string, a ...V) string {
 
 	// Return quotes back to normal
 	out = html.UnescapeString(out)
-
-	// escape any outstanding '%' signs so that they don't get interpreted
-	// as a formatting directive down the line
-	out = strings.ReplaceAll(out, "%", "%%")
-	// avoid doubling up in case this function is called multiple times
-	out = strings.ReplaceAll(out, "%%%%", "%%")
 	return out
 }
 
